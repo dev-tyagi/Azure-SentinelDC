@@ -1,3 +1,5 @@
+# This is function version 2.0.0 supporting python > 3.9
+
 import os
 import asyncio
 from azure.storage.blob.aio import ContainerClient
@@ -26,9 +28,11 @@ AZURE_STORAGE_CONNECTION_STRING = os.environ['AZURE_STORAGE_CONNECTION_STRING']
 CONTAINER_NAME = os.environ['CONTAINER_NAME']
 WORKSPACE_ID = os.environ['WORKSPACE_ID']
 SHARED_KEY = os.environ['SHARED_KEY']
+WORKSPACE_ID_2 = os.environ['WORKSPACE_ID_2']
+SHARED_KEY_2 = os.environ['SHARED_KEY_2']
 LOG_TYPE = 'Cloudflare'
 LINE_SEPARATOR = os.environ.get(
-    'lineSeparator',  '[\n\r\x0b\v\x0c\f\x1c\x1d\x85\x1e\u2028\u2029]+')
+    'lineSeparator',  '[\n\r\x0b\v\x0c\f\x1c\x1d\x1e\u2028\u2029]+')
 
 # Defines how many files can be processed simultaneously
 MAX_CONCURRENT_PROCESSING_FILES = int(
@@ -44,14 +48,22 @@ MAX_BUCKET_SIZE = int(os.environ.get('MAX_BUCKET_SIZE', 2000))
 MAX_CHUNK_SIZE_MB = int(os.environ.get('MAX_CHUNK_SIZE_MB', 1))
 
 LOG_ANALYTICS_URI = os.environ.get('logAnalyticsUri')
+LOG_ANALYTICS_URI_2 = os.environ.get('logAnalyticsUri2')
 
 if not LOG_ANALYTICS_URI or str(LOG_ANALYTICS_URI).isspace():
     LOG_ANALYTICS_URI = 'https://' + WORKSPACE_ID + '.ods.opinsights.azure.com'
+if not LOG_ANALYTICS_URI_2 or str(LOG_ANALYTICS_URI_2).isspace():
+    LOG_ANALYTICS_URI_2 = 'https://' + WORKSPACE_ID_2 + '.ods.opinsights.azure.com'
+
 
 pattern = r'https:\/\/([\w\-]+)\.ods\.opinsights\.azure.([a-zA-Z\.]+)$'
 match = re.match(pattern, str(LOG_ANALYTICS_URI))
 if not match:
     raise Exception("Invalid Log Analytics Uri.")
+pattern = r'https:\/\/([\w\-]+)\.ods\.opinsights\.azure.([a-zA-Z\.]+)$'
+if not re.match(pattern, str(LOG_ANALYTICS_URI_2)):
+    raise Exception("Invalid Log Analytics URI for the second workspace.")
+
 
 
 async def main(mytimer: func.TimerRequest):
@@ -69,11 +81,9 @@ async def main(mytimer: func.TimerRequest):
                     try:
                         cor = conn.process_blob(blob, container_client, session)
                         cors.append(cor)
-                        logging.info(f'len(cors) is {len(cors)}')
                     except Exception as e:
                         logging.error(f'Exception in processing blob is {e}')
                     if len(cors) >= MAX_PAGE_SIZE:
-                        logging.info(f'len(cors) is {len(cors)}')
                         await asyncio.gather(*cors)
                         cors = []
                     if conn.check_if_script_runs_too_long():
@@ -107,8 +117,8 @@ class AzureBlobStorageConnector:
             return ContainerClient.from_connection_string(self.__conn_string, self.__container_name, logging_enable=False, max_single_get_size=MAX_CHUNK_SIZE_MB*1024*1024, max_chunk_get_size=MAX_CHUNK_SIZE_MB*1024*1024)
         except Exception as ex:
             logging.error('An error occurred in _create_container_client: {}'.format(str(ex)))
-            logging.error(traceback.format_exc())    
-            return None    
+            logging.error(traceback.format_exc())
+            return None        
         
     async def get_blobs(self):
         try:
@@ -145,7 +155,10 @@ class AzureBlobStorageConnector:
                 try:
                     sentinel = AzureSentinelConnectorAsync(
                         session, LOG_ANALYTICS_URI, WORKSPACE_ID, SHARED_KEY, LOG_TYPE, queue_size=MAX_BUCKET_SIZE)
+                    sentinel_2 = AzureSentinelConnectorAsync(
+                    session, LOG_ANALYTICS_URI_2, WORKSPACE_ID_2, SHARED_KEY_2, LOG_TYPE, queue_size=MAX_BUCKET_SIZE)
                     blob_cor = await container_client.download_blob(blob['name'], encoding="utf-8")
+
                 except Exception as e:
                     logging.error(f'error while connecting to Sentinel: {e}')
                     logging.error(traceback.format_exc())
@@ -161,11 +174,13 @@ class AzureBlobStorageConnector:
                                 except JSONDecodeError as je:
                                     logging.error('JSONDecode error while loading json event at line value {}. blob name: {}. Error {}'.format(
                                         line, blob['name'], str(je)))
+                                    raise je
                                 except ValueError as e:
                                     logging.error('Error while loading json Event at line value {}. blob name: {}. Error: {}'.format(
                                         line, blob['name'], str(e)))
                                     raise e
                                 await sentinel.send(event)
+                                await sentinel_2.send(event)
                         s = line
                 if s:
                     try:
@@ -173,12 +188,15 @@ class AzureBlobStorageConnector:
                     except JSONDecodeError as je:
                         logging.error('JSONDecode error while loading json event at line value {}. blob name: {}. Error {}'.format(
                             line, blob['name'], str(je)))
+                        raise je
                     except ValueError as e:
                         logging.error('Error while loading json Event at s value {}. blob name: {}. Error: {}'.format(
                             line, blob['name'], str(e)))
                         raise e
                     await sentinel.send(event)
+                    await sentinel_2.send(event)
                 await sentinel.flush()
+                await sentinel_2.flush()
                 await self.delete_blob(blob, container_client)
                 self.total_blobs += 1
                 self.total_events += sentinel.successfull_sent_events_number
@@ -190,3 +208,4 @@ class AzureBlobStorageConnector:
                     
         except Exception as ex:
             logging.error(f"Error in process_blob is {ex}")
+
